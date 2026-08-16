@@ -81,7 +81,7 @@ class RecentConnectionTreeItem extends vscode.TreeItem {
       `Workspace: ${connection.workspaceFolder}`,
       `Remote user: ${connection.remoteUser}`,
       `SSH config: ${connection.sshConfigPath}`,
-      `Docker CLI: ${connection.dockerPath}`,
+      `Container CLI: ${connection.dockerPath}`,
       `Working dir: ${connection.workingDir || '/'}`,
       `Mounts: ${connection.mountSummary || 'none'}`,
       `Last attached: ${formatTimestamp(connection.lastAttachedAt)}`,
@@ -449,7 +449,7 @@ class OpenDevContainerService {
   private getCurrentSettings(): ConnectionSettings {
     const config = vscode.workspace.getConfiguration('openDevContainer');
     return {
-      dockerPath: config.get<string>('dockerPath') || 'docker',
+      dockerPath: config.get<string>('dockerPath') || 'podman',
       remoteUser: ensureSafeRemoteUser(config.get<string>('remoteUser') || 'root'),
       workspaceFolder: config.get<string>('workspaceFolder') || '',
       installSshd: config.get<boolean>('installSshd') ?? true,

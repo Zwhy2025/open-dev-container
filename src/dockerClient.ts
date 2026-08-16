@@ -21,13 +21,41 @@ export function parseDockerContainerList(stdout: string): DockerContainer[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line) as DockerContainer;
-      } catch {
-        throw new OpenDevContainerError('DOCKER_OUTPUT_PARSE_FAILED', 'Docker returned container output that could not be parsed.', line);
-      }
-    });
+    .map((line) => normalizeContainerRecord(parseContainerLine(line), line));
+}
+
+function parseContainerLine(line: string): unknown {
+  try {
+    return JSON.parse(line);
+  } catch {
+    throw new OpenDevContainerError('DOCKER_OUTPUT_PARSE_FAILED', 'Docker returned container output that could not be parsed.', line);
+  }
+}
+
+// Podman's `{{json .}}` marshals the raw ListContainer struct instead of the accessor methods
+// Docker exposes: the id is tagged `Id`, `Names` is an array, and `Status` is left empty.
+export function normalizeContainerRecord(raw: unknown, line?: string): DockerContainer {
+  const record = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+  const names = record.Names;
+  const state = typeof record.State === 'string' ? record.State : '';
+  const status = typeof record.Status === 'string' ? record.Status : '';
+  const id = typeof record.ID === 'string' ? record.ID : typeof record.Id === 'string' ? record.Id : '';
+
+  if (!id) {
+    throw new OpenDevContainerError(
+      'DOCKER_OUTPUT_PARSE_FAILED',
+      'Docker returned a container entry without an ID.',
+      line ?? JSON.stringify(raw)
+    );
+  }
+
+  return {
+    ID: id,
+    Image: typeof record.Image === 'string' ? record.Image : '',
+    Names: Array.isArray(names) ? names.join(',') : typeof names === 'string' ? names : '',
+    State: state,
+    Status: status || state
+  };
 }
 
 export function parseDockerInspect(stdout: string, containerId: string): DockerInspect {

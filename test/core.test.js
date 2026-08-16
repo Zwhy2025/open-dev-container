@@ -29,9 +29,24 @@ test('parseDockerContainerList parses docker JSON lines', () => {
   assert.equal(containers[1].Image, 'redis');
 });
 
+test('parseDockerContainerList normalizes podman container output', () => {
+  const containers = parseDockerContainerList(
+    '{"Id":"8c5872883dfd","Image":"docker.io/library/archlinux:latest","Names":["archi"],"State":"running","Status":""}'
+  );
+
+  assert.equal(containers.length, 1);
+  assert.equal(containers[0].ID, '8c5872883dfd');
+  assert.equal(containers[0].Names, 'archi');
+  assert.equal(containers[0].Status, 'running');
+});
+
 test('parseDockerContainerList reports invalid docker output', () => {
   assert.throws(
     () => parseDockerContainerList('not json'),
+    (error) => error instanceof OpenDevContainerError && error.code === 'DOCKER_OUTPUT_PARSE_FAILED'
+  );
+  assert.throws(
+    () => parseDockerContainerList('{"Image":"node:22","Names":["app"],"State":"running"}'),
     (error) => error instanceof OpenDevContainerError && error.code === 'DOCKER_OUTPUT_PARSE_FAILED'
   );
 });
@@ -148,6 +163,7 @@ test('RecentConnectionStore filters invalid records, sorts, deduplicates, and re
 
 test('buildPrepareSshdScript includes install and no-install failure paths', () => {
   assert.match(buildPrepareSshdScript('root', 'ssh-ed25519 AAA test', true), /apt-get install -y openssh-server/);
+  assert.match(buildPrepareSshdScript('root', 'ssh-ed25519 AAA test', true), /pacman -Sy --noconfirm openssh/);
   assert.match(buildPrepareSshdScript('root', 'ssh-ed25519 AAA test', false), /OPEN_DEV_CONTAINER_ERROR=MISSING_SSHD/);
 });
 
@@ -183,3 +199,16 @@ class MemoryStorage {
     this.value = value;
   }
 }
+
+test('buildPrepareSshdScript force command exits with the command instead of lingering', () => {
+  const script = buildPrepareSshdScript('root', 'ssh-ed25519 AAAA test', false);
+  const forceCommand = script.match(/<<'EOF'\n([\s\S]*?)\nEOF/)[1];
+  // open-remote-ssh resolves exec() only when the channel closes; a lingering
+  // session (the old `while :; do sleep 3600; done`) hangs the connection.
+  assert.doesNotMatch(forceCommand, /sleep 3600/);
+  assert.match(forceCommand, /exec "\$\{SHELL:-\/bin\/sh\}" -c "\$CMD"/);
+  assert.doesNotMatch(forceCommand, /-lc/);
+  // Strips the login shell from open-remote-ssh's "... | bash -l" server install
+  // so hostile container profile/rc files cannot swallow the piped script.
+  assert.match(forceCommand, /\| bash -l"\)\s+CMD="\$\{CMD%\| bash -l\}\| bash"/);
+});

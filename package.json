@@ -1,7 +1,7 @@
 {
   "name": "open-dev-container",
-  "displayName": "Open Dev Container",
-  "description": "Open running Docker containers as development workspaces via Remote SSH. Supports VS Code-compatible editors such as Trae CN.",
+  "displayName": "Open Dev Container (podman fork)",
+  "description": "Open running Docker containers as development workspaces via Remote SSH. Supports VSCodium and jeanp413 SSH extension",
   "version": "0.0.3",
   "publisher": "Zwhy2025",
   "license": "MIT",
@@ -122,8 +122,8 @@
       "properties": {
         "openDevContainer.dockerPath": {
           "type": "string",
-          "default": "docker",
-          "description": "Docker CLI executable used by this extension."
+          "default": "podman",
+          "description": "Container CLI executable used by this extension (podman or docker)."
         },
         "openDevContainer.remoteUser": {
           "type": "string",

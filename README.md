@@ -25,7 +25,7 @@ GitHub 仓库：[https://github.com/Zwhy2025/open-dev-container ](https://githu
 - 主机上可用的 Docker CLI。
 - 主机上可用的 `ssh` 和 `ssh-keygen`。
 - 容器允许执行 `docker exec -u 0`。
-- 如果容器里没有 `sshd`，需要 `apt-get`、`apk`、`dnf`、`yum` 或 `microdnf` 之一。
+- 如果容器里没有 `sshd`，需要 `apt-get`、`apk`、`dnf`、`yum`、`microdnf` 或 `pacman` 之一。
 
 ## 使用方法
 
@@ -55,3 +55,38 @@ Open Dev Container: Attach to Running Container
 - `openDevContainer.sshConfigPath`：SSH 配置路径；留空表示 `~/.ssh/config`。
 
 最近连接会保存在扩展全局存储中，编辑器重启后仍然可用。
+
+## Nix / NixOS
+
+This repo ships a flake that builds the extension as a nixpkgs-style VS Code
+extension derivation (`share/vscode/extensions/Zwhy2025.open-dev-container`).
+
+```nix
+# flake.nix of your NixOS / home-manager config
+inputs.open-dev-container.url = "github:int3hh/open-dev-container";
+
+# home-manager (VS Code or VSCodium – set `package` accordingly)
+programs.vscode = {
+  enable = true;
+  package = pkgs.vscodium;   # omit for VS Code
+  profiles.default.extensions = [
+    inputs.open-dev-container.packages.${pkgs.system}.default
+    pkgs.vscode-extensions.jeanp413.open-remote-ssh   # Remote SSH for VSCodium
+  ];
+};
+
+# or plain nixpkgs
+environment.systemPackages = [
+  (pkgs.vscode-with-extensions.override {
+    vscode = pkgs.vscodium;  # omit for VS Code
+    vscodeExtensions = [ inputs.open-dev-container.packages.${pkgs.system}.default ];
+  })
+];
+```
+
+VSCodium note: Microsoft's `ms-vscode-remote.remote-ssh` is not available for
+VSCodium; use `jeanp413.open-remote-ssh` instead, which provides the same
+`ssh-remote` authority this extension opens.
+
+An overlay is also exported (`inputs.open-dev-container.overlays.default`)
+which adds `pkgs.open-dev-container`. Build locally with `nix build`.

@@ -2,6 +2,10 @@ import { execFile } from 'node:child_process';
 import { OpenDevContainerError, formatErrorDetail } from './errors';
 import type { ExecResult } from './types';
 
+function isContainerCli(file: string): boolean {
+  return /(^|[\\/])(docker|podman)(\.exe)?$/i.test(file);
+}
+
 export async function execFileAsync(
   file: string,
   args: string[],
@@ -29,10 +33,10 @@ export function normalizeCommandError(
   const combined = [stderr.trim(), stdout.trim(), error.message].filter(Boolean).join('\n').trim();
 
   if (error.code === 'ENOENT') {
-    if (file === 'docker') {
+    if (isContainerCli(file)) {
       return new OpenDevContainerError(
         'DOCKER_CLI_MISSING',
-        'Docker CLI was not found. Configure `openDevContainer.dockerPath` or install Docker.',
+        `${file} was not found. Configure \`openDevContainer.dockerPath\` or install Podman/Docker.`,
         combined
       );
     }
@@ -46,20 +50,20 @@ export function normalizeCommandError(
     }
   }
 
-  if (file === 'docker') {
-    if (/cannot connect to the Docker daemon|permission denied while trying to connect to the Docker daemon|is the docker daemon running|error during connect/i.test(combined)) {
+  if (isContainerCli(file)) {
+    if (/cannot connect to the Docker daemon|permission denied while trying to connect to the Docker daemon|is the docker daemon running|error during connect|cannot connect to podman|unable to connect to podman socket|podman.sock/i.test(combined)) {
       return new OpenDevContainerError(
         'DOCKER_DAEMON_UNAVAILABLE',
-        'Docker daemon is not reachable or the current user cannot access it.',
+        'The container engine is not reachable or the current user cannot access it.',
         combined,
         typeof error.code === 'number' ? error.code : undefined
       );
     }
 
-    if (/permission denied|operation not permitted/i.test(combined) && /docker/i.test(combined)) {
+    if (/permission denied|operation not permitted/i.test(combined) && /docker|podman/i.test(combined)) {
       return new OpenDevContainerError(
         'DOCKER_PERMISSION_DENIED',
-        'Docker denied the requested operation. Check socket permissions, rootless mode, or container policy.',
+        'The container engine denied the requested operation. Check socket permissions, rootless mode, or container policy.',
         combined,
         typeof error.code === 'number' ? error.code : undefined
       );

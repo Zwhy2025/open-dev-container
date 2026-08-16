@@ -90,6 +90,8 @@ if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
     yum install -y openssh-server
   elif command -v microdnf >/dev/null 2>&1; then
     microdnf install -y openssh-server
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm openssh
   else
     echo "OPEN_DEV_CONTAINER_ERROR=NO_PACKAGE_MANAGER" >&2
     echo "openssh-server is missing and no supported package manager was found." >&2
@@ -131,21 +133,28 @@ ssh-keygen -A >/dev/null 2>&1 || true
 
 cat > ${shellQuote(CONTAINER_FORCE_COMMAND_SCRIPT)} <<'EOF'
 #!/bin/sh
-set -eu
-
+# Run the requested command (or a login shell) and exit with its status.
+# The channel must close when the command ends: Remote SSH clients such as
+# open-remote-ssh wait for exec() to close before continuing, so keeping the
+# session alive here would hang the connection forever.
+# Commands run exactly like stock sshd does it: "$SHELL -c", *not* a login
+# shell. Login startup files (/etc/profile, ~/.profile) often print banners
+# or exec an interactive shell, which breaks Remote SSH's install script.
 if [ -n "\${SSH_ORIGINAL_COMMAND:-}" ]; then
-  sh -lc "$SSH_ORIGINAL_COMMAND" || true
-else
-  if command -v bash >/dev/null 2>&1; then
-    bash -l || true
-  else
-    /bin/sh || true
-  fi
+  CMD=$SSH_ORIGINAL_COMMAND
+  # open-remote-ssh installs the VSCodium server with "... | bash -l". A *login*
+  # shell sources the container's profile/rc files; in hand-built images those
+  # frequently read stdin or exit for non-interactive shells, which swallows the
+  # piped install script -> the client fails with "Failed parsing install script
+  # output". The install needs no login environment, so strip the login shell.
+  case "$CMD" in
+    *"| bash -l")      CMD="\${CMD%| bash -l}| bash" ;;
+    *"| bash --login") CMD="\${CMD%| bash --login}| bash" ;;
+  esac
+  exec "\${SHELL:-/bin/sh}" -c "$CMD"
 fi
-
-while :; do
-  sleep 3600
-done
+# Interactive session: login shell.
+exec "\${SHELL:-/bin/sh}" -l
 EOF
 chmod 755 ${shellQuote(CONTAINER_FORCE_COMMAND_SCRIPT)}
 

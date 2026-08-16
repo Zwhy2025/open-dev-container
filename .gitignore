@@ -1,4 +1,5 @@
+out
 node_modules/
 dist/
 *.vsix
-out/
+out/result
