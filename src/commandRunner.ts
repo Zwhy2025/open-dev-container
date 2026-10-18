@@ -3,17 +3,16 @@ import { findRuntimeByCli } from './containerRuntimes';
 import { OpenDevContainerError, formatErrorDetail } from './errors';
 import type { ExecResult } from './types';
 
-export async function execFileAsync(
-  file: string,
-  args: string[],
-  options: {
-    maxBuffer?: number;
-    onStdout?: (chunk: string) => void;
-    onStderr?: (chunk: string) => void;
-  } = {}
-): Promise<ExecResult> {
+export type ExecOptions = {
+  maxBuffer?: number;
+  env?: NodeJS.ProcessEnv;
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
+};
+
+export async function execFileAsync(file: string, args: string[], options: ExecOptions = {}): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
-    const child = execFile(file, args, { maxBuffer: options.maxBuffer ?? 1024 * 1024 }, (error, stdout, stderr) => {
+    const child = execFile(file, args, { maxBuffer: options.maxBuffer ?? 1024 * 1024, env: options.env }, (error, stdout, stderr) => {
       if (error) {
         reject(normalizeCommandError(file, args, error, stdout, stderr));
         return;

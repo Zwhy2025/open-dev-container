@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { CONTAINER_RUNTIMES, findRuntimeByCli } from './containerRuntimes';
 
-export type RuntimeState = { cli: string; availableIds: string[]; detecting: boolean };
+export type RuntimeState = { cli: string; availableIds: string[]; detecting: boolean; hostLabel: string };
 export type PanelAction = 'start' | 'stop' | 'restart' | 'remove' | 'shell' | 'attach' | 'reconnect' | 'disconnect' | 'clean';
 export type PanelNode = {
   id: string;
@@ -51,7 +51,7 @@ export class ContainerPanelProvider<T> implements vscode.WebviewViewProvider {
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource}; script-src 'nonce-${nonce}';">
       <link rel="stylesheet" href="${resource('containerPanel.css')}">
       </head><body>
-      <header><strong>Containers</strong><div class="tools">
+      <header><strong>Containers</strong><span id="host" class="host-badge" title="Host the container CLI runs on"></span><div class="tools">
       <select id="runtime" aria-label="Container runtime" disabled><option>Loading…</option></select>
       <button id="refresh" class="icon-button" title="Refresh containers" aria-label="Refresh containers"></button>
       <button id="more" class="icon-button" title="More actions" aria-label="More actions" aria-expanded="false" aria-controls="menu"></button>

@@ -35,6 +35,9 @@ export type ConnectionSettings = {
   installSshd: boolean;
   openInNewWindow: boolean;
   sshConfigPath: string;
+  // SSH host alias the container CLI runs on.  Empty when the window works
+  // against the local machine.
+  sshTarget?: string;
 };
 
 export type RecentConnection = {

@@ -3,14 +3,23 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { classifyHostCommandError, execFileAsync } from './commandRunner';
 import { CONTAINER_SSHD_CONFIG, prepareContainerSshd } from './containerProvisioner';
-import { detectAvailableRuntimes, findRuntimeByCli, resolveContainerCli, type ContainerRuntime } from './containerRuntimes';
+import { detectAvailableRuntimes } from './containerExec';
+import { findRuntimeByCli, resolveContainerCli, type ContainerRuntime } from './containerRuntimes';
+import { resolveActiveSshTarget } from './remoteHost';
 import { getContainerActions, getContainerStatus, resolveContainerShell } from './containerState';
 import { DockerClient } from './dockerClient';
 import { OpenDevContainerError, formatDiagnostic, formatErrorDetail } from './errors';
 import { chmodQuiet, exists } from './fileSystem';
 import { RecentConnectionStore } from './recentConnections';
+import { configureSshAuth, getSshAskpassScript } from './sshAuth';
 import { ContainerPanelProvider, type RuntimeState } from './containerPanel';
-import { removeAllManagedBlocksFromFile, removeManagedHostBlockFromFile, upsertSshConfig } from './sshConfig';
+import {
+  ensureManagedConfigLayout,
+  MANAGED_CONFIG_PATH,
+  removeAllManagedBlocksFromFile,
+  removeManagedHostBlockFromFile,
+  upsertSshConfig
+} from './sshConfig';
 import type { ConnectionSettings, DockerContainer, RecentConnection } from './types';
 import {
   buildConnectionKey,
@@ -118,6 +127,17 @@ export function activate(context: vscode.ExtensionContext) {
   outputChannel.appendLine(`[${new Date().toISOString()}] activated version=${manifest.version} mode=${build?.mode || 'release'} build=${build?.id || 'unmarked'} baseVersion=${build?.baseVersion || manifest.version} path=${context.extensionPath}`);
   if (build?.mode === 'debug') outputChannel.show(true);
 
+  configureSshAuth(path.join(context.globalStorageUri.fsPath, 'ssh-auth'), async (target) => {
+    outputChannel.appendLine(`[${new Date().toISOString()}] ssh auth failed for ${target}, asking for the password`);
+    return (await vscode.window.showInputBox({
+      password: true,
+      ignoreFocusOut: true,
+      title: `SSH Password · ${target}`,
+      placeHolder: 'Password for this remote host',
+      prompt: 'Open Dev Container needs to run the container CLI on this host over ssh.'
+    })) || undefined;
+  });
+
   let panel: ContainerPanelProvider<TreeNode> | undefined;
   const service = new OpenDevContainerService(context, outputChannel, () => { void panel?.refresh(); });
   const treeProvider = new ContainerTreeProvider(service);
@@ -152,6 +172,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration('openDevContainer.dockerPath')) void panel?.refresh();
   }));
+  void service.ensureSshConfigLayout();
   void service.refreshAvailableRuntimes();
   context.subscriptions.push(
     registerSafeCommand(outputChannel, 'open-dev-container.attachRunningContainer', async (target?: ContainerTreeItem) => {
@@ -215,7 +236,7 @@ class ContainerTreeProvider {
   private async getRunningContainerItems(): Promise<TreeNode[]> {
     try {
       const cli = this.service.getRuntimeSelectorState().cli;
-      const containers = await new DockerClient(cli).listAllContainers();
+      const containers = await this.service.createDockerClient(cli).listAllContainers();
       if (containers.length === 0) {
         return [new MessageTreeItem('No containers', `Create a ${this.service.getActiveRuntimeLabel()} container to get started.`, 'circle-slash')];
       }
@@ -249,7 +270,7 @@ class ContainerTreeProvider {
   private async getContainerDetailItems(item: ContainerTreeItem): Promise<TreeNode[]> {
     const container = item.container;
     try {
-      const inspect = await new DockerClient(item.cli).inspectContainer(container.ID);
+      const inspect = await this.service.createDockerClient(item.cli).inspectContainer(container.ID);
       const workingDir = inspect.Config?.WorkingDir || '/';
       const mounts = inspect.Mounts || [];
       return [
@@ -288,7 +309,7 @@ class OpenDevContainerService {
   }
 
   async attachShell(target: ContainerTreeItem): Promise<void> {
-    const client = new DockerClient(target.cli);
+    const client = this.createDockerClient(target.cli);
     const container = (await client.listAllContainers()).find((item) => item.ID === target.container.ID);
     if (!container || getContainerStatus(container).state !== 'running') {
       throw new OpenDevContainerError('CONTAINER_NOT_FOUND', 'The container is no longer running. Refresh the list.');
@@ -302,7 +323,7 @@ class OpenDevContainerService {
   }
 
   async changeContainerState(target: ContainerTreeItem, action: 'start' | 'stop' | 'restart'): Promise<void> {
-    const client = new DockerClient(target.cli);
+    const client = this.createDockerClient(target.cli);
     const container = (await client.listAllContainers()).find((item) => item.ID === target.container.ID);
     if (!container) {
       throw new OpenDevContainerError('CONTAINER_NOT_FOUND', 'The container no longer exists. Refresh the list.');
@@ -329,7 +350,7 @@ class OpenDevContainerService {
   }
 
   async removeContainer(target: ContainerTreeItem): Promise<void> {
-    const container = (await new DockerClient(target.cli).listAllContainers()).find((item) => item.ID === target.container.ID);
+    const container = (await this.createDockerClient(target.cli).listAllContainers()).find((item) => item.ID === target.container.ID);
     if (!container) {
       throw new OpenDevContainerError('CONTAINER_NOT_FOUND', 'The container no longer exists. Refresh the list.');
     }
@@ -340,7 +361,7 @@ class OpenDevContainerService {
       'Remove'
     );
     if (choice !== 'Remove') return;
-    await new DockerClient(target.cli).removeContainer(container.ID);
+    await this.createDockerClient(target.cli).removeContainer(container.ID);
     this.log(`remove container=${container.ID} cli=${target.cli}`);
     this.refreshTree();
   }
@@ -415,7 +436,7 @@ class OpenDevContainerService {
     this.detectingRuntimes = true;
     this.refreshTree();
     try {
-      this.availableRuntimes = await detectAvailableRuntimes();
+      this.availableRuntimes = await detectAvailableRuntimes(this.getCurrentSettings().sshTarget);
     } finally {
       this.detectingRuntimes = false;
       this.refreshTree();
@@ -423,10 +444,12 @@ class OpenDevContainerService {
   }
 
   getRuntimeSelectorState(): RuntimeState {
+    const settings = this.getCurrentSettings();
     return {
-      cli: this.getCurrentSettings().dockerPath,
+      cli: settings.dockerPath,
       availableIds: this.availableRuntimes.map((runtime) => runtime.id),
-      detecting: this.detectingRuntimes
+      detecting: this.detectingRuntimes,
+      hostLabel: settings.sshTarget ? `Remote · ${settings.sshTarget}` : 'Local'
     };
   }
 
@@ -487,6 +510,10 @@ class OpenDevContainerService {
 
   createErrorTreeItem(error: unknown, label: string): MessageTreeItem {
     const diagnostic = formatDiagnostic(error);
+    this.log(`ERROR ${label} code=${diagnostic.code}: ${diagnostic.message}`);
+    if (diagnostic.detail) {
+      this.log(diagnostic.detail);
+    }
     return new MessageTreeItem(label, diagnostic.message, 'error');
   }
 
@@ -519,7 +546,7 @@ class OpenDevContainerService {
         };
 
         const inspect = await runPhase('inspect', 'Inspecting container', () =>
-          new DockerClient(settings.dockerPath).inspectContainer(container.ID)
+          this.createDockerClient(settings.dockerPath).inspectContainer(container.ID)
         );
         const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const workspaceFolder = settings.workspaceFolder || resolveWorkspaceFolder(inspect, localWorkspace);
@@ -542,18 +569,21 @@ class OpenDevContainerService {
             settings.remoteUser,
             publicKey,
             settings.installSshd,
-            (stream, chunk) => this.logCommandOutput(`sshd ${stream}`, chunk)
+            (stream, chunk) => this.logCommandOutput(`sshd ${stream}`, chunk),
+            settings.sshTarget
           )
         );
 
         const hostAlias = createHostAlias(container);
-        await runPhase('ssh-config', 'Updating SSH config', () => upsertSshConfig(settings.sshConfigPath, hostAlias, {
+        await runPhase('ssh-config', 'Updating SSH config', async () => upsertSshConfig(settings.sshConfigPath, hostAlias, {
           dockerPath: settings.dockerPath,
           containerId: container.ID,
           identityFile: keyPath,
           remoteUser: settings.remoteUser,
           sshdPath,
-          containerSshdConfig: CONTAINER_SSHD_CONFIG
+          containerSshdConfig: CONTAINER_SSHD_CONFIG,
+          sshTarget: settings.sshTarget,
+          askpassScript: await getSshAskpassScript(settings.sshTarget)
         }));
 
         await runPhase('remote-open', 'Opening Remote SSH window', () =>
@@ -589,7 +619,7 @@ class OpenDevContainerService {
   }
 
   private async pickRunningContainer(dockerPath: string): Promise<DockerContainer | undefined> {
-    const containers = await new DockerClient(dockerPath).listRunningContainers();
+    const containers = await this.createDockerClient(dockerPath).listRunningContainers();
     if (containers.length === 0) {
       throw new OpenDevContainerError('NO_RUNNING_CONTAINERS', 'No running Docker containers found.');
     }
@@ -608,7 +638,7 @@ class OpenDevContainerService {
   }
 
   private async resolveContainerForRecent(recent: RecentConnection, dockerPath: string): Promise<DockerContainer | undefined> {
-    const containers = await new DockerClient(dockerPath).listRunningContainers();
+    const containers = await this.createDockerClient(dockerPath).listRunningContainers();
     const byId = containers.find((container) => container.ID === recent.containerId);
     if (byId) {
       return byId;
@@ -640,6 +670,8 @@ class OpenDevContainerService {
 
   private getCurrentSettings(): ConnectionSettings {
     const config = vscode.workspace.getConfiguration('openDevContainer');
+    const explicit = (config.get<string>('sshConfigPath') || '').trim();
+
     return {
       dockerPath: resolveContainerCli(
         config.get<string>('dockerPath') || '',
@@ -650,8 +682,31 @@ class OpenDevContainerService {
       workspaceFolder: config.get<string>('workspaceFolder') || '',
       installSshd: config.get<boolean>('installSshd') ?? true,
       openInNewWindow: config.get<boolean>('openInNewWindow') ?? true,
-      sshConfigPath: expandHome(config.get<string>('sshConfigPath') || '~/.ssh/config')
+      sshConfigPath: expandHome(explicit || MANAGED_CONFIG_PATH),
+      sshTarget: resolveActiveSshTarget().target
     };
+  }
+
+  // Keeps managed blocks out of the user's own SSH config.  Skipped when the
+  // user pins `openDevContainer.sshConfigPath` to a file of their choosing.
+  async ensureSshConfigLayout(): Promise<void> {
+    const config = vscode.workspace.getConfiguration('openDevContainer');
+    if ((config.get<string>('sshConfigPath') || '').trim()) {
+      return;
+    }
+
+    try {
+      const result = await ensureManagedConfigLayout(
+        expandHome('~/.ssh/config'),
+        expandHome(MANAGED_CONFIG_PATH)
+      );
+
+      if (result.migrated > 0 || result.includeAdded) {
+        this.log(`ssh config layout updated includeAdded=${result.includeAdded} migrated=${result.migrated}`);
+      }
+    } catch (error: unknown) {
+      this.log(`ssh config layout skipped: ${formatErrorDetail(error)}`);
+    }
   }
 
   private getReconnectSettings(recent: RecentConnection): ConnectionSettings {
@@ -706,8 +761,9 @@ class OpenDevContainerService {
     }
   }
 
-  private createDockerClient(): DockerClient {
-    return new DockerClient(this.getCurrentSettings().dockerPath);
+  createDockerClient(cli?: string): DockerClient {
+    const settings = this.getCurrentSettings();
+    return new DockerClient({ dockerPath: cli || settings.dockerPath, sshTarget: settings.sshTarget });
   }
 
   private log(message: string): void {

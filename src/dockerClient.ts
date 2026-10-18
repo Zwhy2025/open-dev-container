@@ -1,38 +1,57 @@
+import { execContainerCli, type ExecFn } from './containerExec';
 import { execFileAsync } from './commandRunner';
 import { OpenDevContainerError, formatErrorDetail } from './errors';
-import type { DockerContainer, DockerInspect } from './types';
+import type { DockerContainer, DockerInspect, ExecResult } from './types';
+
+export type DockerClientOptions = {
+  dockerPath: string;
+  sshTarget?: string;
+  run?: ExecFn;
+};
 
 export class DockerClient {
-  constructor(private readonly dockerPath: string, private readonly run = execFileAsync) {}
+  private readonly dockerPath: string;
+  private readonly sshTarget?: string;
+  private readonly run: ExecFn;
+
+  constructor(options: DockerClientOptions) {
+    this.dockerPath = options.dockerPath;
+    this.sshTarget = options.sshTarget;
+    this.run = options.run ?? execFileAsync;
+  }
+
+  private exec(args: string[], maxBuffer = 1024 * 1024): Promise<ExecResult> {
+    return execContainerCli(this.dockerPath, args, this.sshTarget, { maxBuffer }, this.run);
+  }
 
   async listRunningContainers(): Promise<DockerContainer[]> {
-    const { stdout } = await this.run(this.dockerPath, ['ps', '--format', '{{json .}}'], { maxBuffer: 1024 * 1024 });
+    const { stdout } = await this.exec(['ps', '--format', '{{json .}}']);
     return parseDockerContainerList(stdout);
   }
 
   async listAllContainers(): Promise<DockerContainer[]> {
-    const { stdout } = await this.run(this.dockerPath, ['ps', '-a', '--format', '{{json .}}'], { maxBuffer: 1024 * 1024 });
+    const { stdout } = await this.exec(['ps', '-a', '--format', '{{json .}}']);
     return parseDockerContainerList(stdout);
   }
 
   async startContainer(containerId: string): Promise<void> {
-    await this.run(this.dockerPath, ['start', containerId]);
+    await this.exec(['start', containerId]);
   }
 
   async stopContainer(containerId: string): Promise<void> {
-    await this.run(this.dockerPath, ['stop', containerId]);
+    await this.exec(['stop', containerId]);
   }
 
   async restartContainer(containerId: string): Promise<void> {
-    await this.run(this.dockerPath, ['restart', containerId]);
+    await this.exec(['restart', containerId]);
   }
 
   async removeContainer(containerId: string): Promise<void> {
-    await this.run(this.dockerPath, ['rm', '-f', containerId]);
+    await this.exec(['rm', '-f', containerId]);
   }
 
   async inspectContainer(containerId: string): Promise<DockerInspect> {
-    const { stdout } = await this.run(this.dockerPath, ['inspect', containerId], { maxBuffer: 10 * 1024 * 1024 });
+    const { stdout } = await this.exec(['inspect', containerId], 10 * 1024 * 1024);
     return parseDockerInspect(stdout, containerId);
   }
 }

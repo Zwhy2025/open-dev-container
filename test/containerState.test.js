@@ -25,10 +25,10 @@ test('container shell setting uses bash by default and preserves a configured co
 test('container client lists stopped containers and invokes start/stop on the selected engine', async () => {
   for (const cli of ['docker', '/usr/bin/podman']) {
     const calls = [];
-    const client = new DockerClient(cli, async (file, args) => {
+    const client = new DockerClient({ dockerPath: cli, run: async (file, args) => {
       calls.push([file, args]);
       return { stdout: args[0] === 'ps' ? '{"ID":"abc","State":"exited","Status":"Exited (0)"}' : '', stderr: '' };
-    });
+    } });
     assert.equal((await client.listAllContainers())[0].State, 'exited');
     await client.startContainer('abc');
     await client.stopContainer('abc');
@@ -42,7 +42,7 @@ test('container client lists stopped containers and invokes start/stop on the se
 
 test('container lifecycle command failures propagate to the caller', async () => {
   const failure = new Error('daemon unavailable');
-  const client = new DockerClient('docker', async () => { throw failure; });
+  const client = new DockerClient({ dockerPath: 'docker', run: async () => { throw failure; } });
   await assert.rejects(client.startContainer('abc'), failure);
   await assert.rejects(client.stopContainer('abc'), failure);
 });

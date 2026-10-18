@@ -1,8 +1,8 @@
 {
   "name": "open-dev-container",
   "displayName": "Open Dev Container",
-  "description": "Open running Docker containers as development workspaces via Remote SSH. Supports VS Code-compatible editors such as Trae CN.",
-  "version": "0.0.4",
+  "description": "Open running Docker or Podman containers as development workspaces via Remote SSH. Supports VS Code-compatible editors such as Trae CN.",
+  "version": "0.0.5",
   "publisher": "Zwhy2025",
   "license": "MIT",
   "icon": "resources/open-dev-container.png",
@@ -15,6 +15,7 @@
   "keywords": [
     "open",
     "docker",
+    "podman",
     "container",
     "devcontainer",
     "remote"
@@ -107,6 +108,11 @@
           "default": "bash",
           "description": "Shell command to run inside the container for Attach shell, such as bash, /bin/bash, or zsh."
         },
+        "openDevContainer.remoteHost": {
+          "type": "string",
+          "default": "",
+          "description": "SSH host alias used to run container commands when the window is connected through Remote SSH. Leave empty to derive it from the active remote workspace."
+        },
         "openDevContainer.workspaceFolder": {
           "type": "string",
           "default": "",
@@ -125,7 +131,7 @@
         "openDevContainer.sshConfigPath": {
           "type": "string",
           "default": "",
-          "description": "SSH config path to update. Empty means ~/.ssh/config."
+          "description": "SSH config path to update. Empty means the extension writes to ~/.ssh/config.d/open-dev-container.conf and adds one Include line to ~/.ssh/config."
         }
       }
     }

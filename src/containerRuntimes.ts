@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-
 export type ContainerRuntime = {
   id: string;
   label: string;
@@ -54,14 +52,4 @@ export function resolveContainerCli(
 
   const detected = CONTAINER_RUNTIMES.find((runtime) => availableRuntimeIds.includes(runtime.id));
   return (detected || CONTAINER_RUNTIMES[0]).cli;
-}
-
-export async function detectAvailableRuntimes(): Promise<ContainerRuntime[]> {
-  const checks = CONTAINER_RUNTIMES.map(async (runtime) => {
-    const available = await new Promise<boolean>((resolve) => {
-      execFile(runtime.cli, ['--version'], (error) => resolve(!error));
-    });
-    return available ? runtime : undefined;
-  });
-  return (await Promise.all(checks)).filter((runtime): runtime is ContainerRuntime => Boolean(runtime));
 }

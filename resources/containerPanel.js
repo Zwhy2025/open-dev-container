@@ -3,6 +3,7 @@
   const runtime = document.getElementById('runtime');
   const groups = document.getElementById('groups');
   const status = document.getElementById('status');
+  const host = document.getElementById('host');
   const more = document.getElementById('more');
   const menu = document.getElementById('menu');
   const contextMenu = document.getElementById('context-menu');
@@ -151,6 +152,7 @@
         option.title = available ? item.label : `${item.label} not detected`; runtime.add(option);
       }
       runtime.value = state.activeId; runtime.title = state.cli;
+      if (host && state.hostLabel) { host.textContent = state.hostLabel; host.hidden = false; }
       runtime.disabled = locked || !state.availableIds.length;
       document.querySelectorAll('button').forEach((node) => { node.disabled = locked; });
       groups.setAttribute('aria-busy', String(locked));

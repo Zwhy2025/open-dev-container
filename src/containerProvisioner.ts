@@ -1,6 +1,8 @@
-import { classifyDockerCommandError, execFileAsync } from './commandRunner';
+import { classifyDockerCommandError } from './commandRunner';
+import { execContainerCli } from './containerExec';
 import { OpenDevContainerError } from './errors';
-import { parseMarker, shellQuote } from './sshConfig';
+import { shellQuote } from './shell';
+import { parseMarker } from './sshConfig';
 
 export const CONTAINER_CONFIG_DIR = '/tmp/open-dev-container';
 export const CONTAINER_SSHD_CONFIG = `${CONTAINER_CONFIG_DIR}/sshd_config`;
@@ -12,16 +14,22 @@ export async function prepareContainerSshd(
   remoteUser: string,
   publicKey: string,
   installSshd: boolean,
-  onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void
+  onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void,
+  sshTarget?: string
 ): Promise<string> {
   const script = buildPrepareSshdScript(remoteUser, publicKey, installSshd);
 
   try {
-    const { stdout, stderr } = await execFileAsync(dockerPath, ['exec', '-u', '0', containerId, 'sh', '-lc', script], {
-      maxBuffer: 5 * 1024 * 1024,
-      onStdout: (chunk) => onOutput?.('stdout', chunk),
-      onStderr: (chunk) => onOutput?.('stderr', chunk)
-    });
+    const { stdout, stderr } = await execContainerCli(
+      dockerPath,
+      ['exec', '-u', '0', containerId, 'sh', '-lc', script],
+      sshTarget,
+      {
+        maxBuffer: 5 * 1024 * 1024,
+        onStdout: (chunk) => onOutput?.('stdout', chunk),
+        onStderr: (chunk) => onOutput?.('stderr', chunk)
+      }
+    );
 
     const sshdPath = parseMarker(stdout, 'OPEN_DEV_CONTAINER_SSHD_PATH');
     if (!sshdPath) {
