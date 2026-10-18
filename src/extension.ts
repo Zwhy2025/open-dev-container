@@ -3,10 +3,13 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { classifyHostCommandError, execFileAsync } from './commandRunner';
 import { CONTAINER_SSHD_CONFIG, prepareContainerSshd } from './containerProvisioner';
+import { detectAvailableRuntimes, findRuntimeByCli, resolveContainerCli, type ContainerRuntime } from './containerRuntimes';
+import { getContainerActions, getContainerStatus, resolveContainerShell } from './containerState';
 import { DockerClient } from './dockerClient';
 import { OpenDevContainerError, formatDiagnostic, formatErrorDetail } from './errors';
 import { chmodQuiet, exists } from './fileSystem';
 import { RecentConnectionStore } from './recentConnections';
+import { ContainerPanelProvider, type RuntimeState } from './containerPanel';
 import { removeAllManagedBlocksFromFile, removeManagedHostBlockFromFile, upsertSshConfig } from './sshConfig';
 import type { ConnectionSettings, DockerContainer, RecentConnection } from './types';
 import {
@@ -23,6 +26,7 @@ import {
 
 const OUTPUT_CHANNEL_NAME = 'Open Dev Container';
 const TREE_VIEW_ID = 'openDevContainer.containersView';
+const ACTIVE_RUNTIME_STATE_KEY = 'openDevContainer.activeRuntime';
 
 type TreeNode = GroupTreeItem | ContainerTreeItem | ContainerDetailTreeItem | RecentConnectionTreeItem | MessageTreeItem;
 
@@ -38,7 +42,7 @@ class GroupTreeItem extends vscode.TreeItem {
 }
 
 class ContainerTreeItem extends vscode.TreeItem {
-  constructor(public readonly container: DockerContainer) {
+  constructor(public readonly container: DockerContainer, public readonly cli: string) {
     super(normalizeContainerName(container.Names), vscode.TreeItemCollapsibleState.Collapsed);
     this.id = `container:${container.ID}`;
     this.contextValue = 'open-dev-container-container';
@@ -109,12 +113,46 @@ class MessageTreeItem extends vscode.TreeItem {
 export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel(OUTPUT_CHANNEL_NAME);
   context.subscriptions.push(outputChannel);
+  const manifest = context.extension.packageJSON;
+  const build = manifest.openDevContainerBuild;
+  outputChannel.appendLine(`[${new Date().toISOString()}] activated version=${manifest.version} mode=${build?.mode || 'release'} build=${build?.id || 'unmarked'} baseVersion=${build?.baseVersion || manifest.version} path=${context.extensionPath}`);
+  if (build?.mode === 'debug') outputChannel.show(true);
 
-  let treeProvider: ContainerTreeProvider | undefined;
-  const service = new OpenDevContainerService(context, outputChannel, () => treeProvider?.refresh());
-  treeProvider = new ContainerTreeProvider(service);
-
-  context.subscriptions.push(vscode.window.registerTreeDataProvider(TREE_VIEW_ID, treeProvider));
+  let panel: ContainerPanelProvider<TreeNode> | undefined;
+  const service = new OpenDevContainerService(context, outputChannel, () => { void panel?.refresh(); });
+  const treeProvider = new ContainerTreeProvider(service);
+  panel = new ContainerPanelProvider(context.extensionUri, {
+    runtime: () => service.getRuntimeSelectorState(),
+    children: (item) => treeProvider.getChildren(item),
+    describe: (item) => ({
+      label: typeof item.label === 'string' ? item.label : item.label?.label || '',
+      description: typeof item.description === 'string' ? item.description : '',
+      tooltip: typeof item.tooltip === 'string' ? item.tooltip : '',
+      icon: item.iconPath instanceof vscode.ThemeIcon ? item.iconPath.id : 'info',
+      expandable: item.collapsibleState !== vscode.TreeItemCollapsibleState.None,
+      status: item instanceof ContainerTreeItem ? getContainerStatus(item.container) : undefined,
+      actions: item instanceof ContainerTreeItem ? getContainerActions(item.container) : item instanceof RecentConnectionTreeItem ? ['reconnect', 'disconnect', 'clean'] : []
+    }),
+    action: async (action, item) => {
+      if (action === 'attach' && item instanceof ContainerTreeItem) await service.attachRunningContainer(item);
+      if (action === 'shell' && item instanceof ContainerTreeItem) await service.attachShell(item);
+      if ((action === 'start' || action === 'stop' || action === 'restart') && item instanceof ContainerTreeItem) {
+        await service.changeContainerState(item, action);
+      }
+      if (action === 'remove' && item instanceof ContainerTreeItem) await service.removeContainer(item);
+      if (action === 'reconnect' && item instanceof RecentConnectionTreeItem) await service.reconnectConnection(item);
+      if (action === 'disconnect' && item instanceof RecentConnectionTreeItem) await service.disconnectConnection(item);
+      if (action === 'clean' && (!item || item instanceof RecentConnectionTreeItem)) await service.cleanSshConfig(item);
+    },
+    switchRuntime: (id) => service.switchRuntime(id),
+    refreshRuntimes: () => service.refreshAvailableRuntimes(),
+    reportError: (error) => showCommandFailure(outputChannel, error)
+  });
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider(TREE_VIEW_ID, panel));
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration('openDevContainer.dockerPath')) void panel?.refresh();
+  }));
+  void service.refreshAvailableRuntimes();
   context.subscriptions.push(
     registerSafeCommand(outputChannel, 'open-dev-container.attachRunningContainer', async (target?: ContainerTreeItem) => {
       await service.attachRunningContainer(target);
@@ -137,31 +175,27 @@ export function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(
     registerSafeCommand(outputChannel, 'open-dev-container.refreshContainers', async () => {
-      treeProvider.refresh();
+      await service.refreshAvailableRuntimes();
+    })
+  );
+  context.subscriptions.push(
+    registerSafeCommand(outputChannel, 'open-dev-container.switchRuntime', async () => {
+      await service.switchRuntime();
     })
   );
 }
 
 export function deactivate() {}
 
-class ContainerTreeProvider implements vscode.TreeDataProvider<TreeNode> {
-  private readonly onDidChangeTreeDataEmitter = new vscode.EventEmitter<TreeNode | undefined>();
-
-  readonly onDidChangeTreeData = this.onDidChangeTreeDataEmitter.event;
-
+class ContainerTreeProvider {
   constructor(private readonly service: OpenDevContainerService) {}
-
-  refresh(): void {
-    this.onDidChangeTreeDataEmitter.fire(undefined);
-  }
-
-  getTreeItem(element: TreeNode): vscode.TreeItem {
-    return element;
-  }
 
   async getChildren(element?: TreeNode): Promise<TreeNode[]> {
     if (!element) {
-      return [new GroupTreeItem('Running Containers', 'running'), new GroupTreeItem('Recent Connections', 'recent')];
+      return [
+        new GroupTreeItem('Individual Containers', 'running'),
+        new GroupTreeItem('Recent Connections', 'recent')
+      ];
     }
 
     if (element instanceof GroupTreeItem) {
@@ -172,7 +206,7 @@ class ContainerTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
 
     if (element instanceof ContainerTreeItem) {
-      return this.getContainerDetailItems(element.container);
+      return this.getContainerDetailItems(element);
     }
 
     return [];
@@ -180,13 +214,14 @@ class ContainerTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   private async getRunningContainerItems(): Promise<TreeNode[]> {
     try {
-      const containers = await this.service.listRunningContainers();
+      const cli = this.service.getRuntimeSelectorState().cli;
+      const containers = await new DockerClient(cli).listAllContainers();
       if (containers.length === 0) {
-        return [new MessageTreeItem('No running containers', 'Start a Docker container to attach to it.', 'circle-slash')];
+        return [new MessageTreeItem('No containers', `Create a ${this.service.getActiveRuntimeLabel()} container to get started.`, 'circle-slash')];
       }
-      return containers.map((container) => new ContainerTreeItem(container));
+      return containers.map((container) => new ContainerTreeItem(container, cli));
     } catch (error: unknown) {
-      return [this.service.createErrorTreeItem(error, 'Unable to load running containers')];
+      return [this.service.createErrorTreeItem(error, 'Unable to load containers')];
     }
   }
 
@@ -211,9 +246,10 @@ class ContainerTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
   }
 
-  private async getContainerDetailItems(container: DockerContainer): Promise<TreeNode[]> {
+  private async getContainerDetailItems(item: ContainerTreeItem): Promise<TreeNode[]> {
+    const container = item.container;
     try {
-      const inspect = await this.service.inspectContainer(container.ID);
+      const inspect = await new DockerClient(item.cli).inspectContainer(container.ID);
       const workingDir = inspect.Config?.WorkingDir || '/';
       const mounts = inspect.Mounts || [];
       return [
@@ -230,6 +266,8 @@ class ContainerTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
 class OpenDevContainerService {
   private readonly recentStore: RecentConnectionStore;
+  private availableRuntimes: ContainerRuntime[] = [];
+  private detectingRuntimes = true;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -240,13 +278,71 @@ class OpenDevContainerService {
   }
 
   async attachRunningContainer(target?: ContainerTreeItem): Promise<void> {
-    const settings = this.getCurrentSettings();
+    const settings = { ...this.getCurrentSettings(), ...(target ? { dockerPath: target.cli } : {}) };
     const container = target?.container || (await this.pickRunningContainer(settings.dockerPath));
     if (!container) {
       return;
     }
 
     await this.attachContainer(container, settings);
+  }
+
+  async attachShell(target: ContainerTreeItem): Promise<void> {
+    const client = new DockerClient(target.cli);
+    const container = (await client.listAllContainers()).find((item) => item.ID === target.container.ID);
+    if (!container || getContainerStatus(container).state !== 'running') {
+      throw new OpenDevContainerError('CONTAINER_NOT_FOUND', 'The container is no longer running. Refresh the list.');
+    }
+    const terminal = vscode.window.createTerminal({
+      name: `${normalizeContainerName(container.Names)} · shell`,
+      shellPath: target.cli,
+      shellArgs: ['exec', '-it', container.ID, resolveContainerShell(vscode.workspace.getConfiguration('openDevContainer').get<string>('containerShell') || '')]
+    });
+    terminal.show();
+  }
+
+  async changeContainerState(target: ContainerTreeItem, action: 'start' | 'stop' | 'restart'): Promise<void> {
+    const client = new DockerClient(target.cli);
+    const container = (await client.listAllContainers()).find((item) => item.ID === target.container.ID);
+    if (!container) {
+      throw new OpenDevContainerError('CONTAINER_NOT_FOUND', 'The container no longer exists. Refresh the list.');
+    }
+    if (!getContainerActions(container).includes(action)) {
+      this.refreshTree();
+      await vscode.window.showInformationMessage(`Container is ${getContainerStatus(container).label.toLowerCase()}; the list has been refreshed.`);
+      return;
+    }
+    try {
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `${action === 'start' ? 'Starting' : action === 'stop' ? 'Stopping' : 'Restarting'} ${normalizeContainerName(container.Names)}`,
+        cancellable: false
+      }, async () => {
+        if (action === 'start') await client.startContainer(container.ID);
+        else if (action === 'stop') await client.stopContainer(container.ID);
+        else await client.restartContainer(container.ID);
+        this.log(`${action} container=${container.ID} cli=${target.cli}`);
+      });
+    } finally {
+      this.refreshTree();
+    }
+  }
+
+  async removeContainer(target: ContainerTreeItem): Promise<void> {
+    const container = (await new DockerClient(target.cli).listAllContainers()).find((item) => item.ID === target.container.ID);
+    if (!container) {
+      throw new OpenDevContainerError('CONTAINER_NOT_FOUND', 'The container no longer exists. Refresh the list.');
+    }
+    const name = normalizeContainerName(container.Names);
+    const choice = await vscode.window.showWarningMessage(
+      `Remove container ${name}? This cannot be undone.`,
+      { modal: true },
+      'Remove'
+    );
+    if (choice !== 'Remove') return;
+    await new DockerClient(target.cli).removeContainer(container.ID);
+    this.log(`remove container=${container.ID} cli=${target.cli}`);
+    this.refreshTree();
   }
 
   async reconnectConnection(target?: RecentConnectionTreeItem): Promise<void> {
@@ -315,6 +411,72 @@ class OpenDevContainerService {
     return this.createDockerClient().listRunningContainers();
   }
 
+  async refreshAvailableRuntimes(): Promise<void> {
+    this.detectingRuntimes = true;
+    this.refreshTree();
+    try {
+      this.availableRuntimes = await detectAvailableRuntimes();
+    } finally {
+      this.detectingRuntimes = false;
+      this.refreshTree();
+    }
+  }
+
+  getRuntimeSelectorState(): RuntimeState {
+    return {
+      cli: this.getCurrentSettings().dockerPath,
+      availableIds: this.availableRuntimes.map((runtime) => runtime.id),
+      detecting: this.detectingRuntimes
+    };
+  }
+
+  async switchRuntime(runtimeId?: string): Promise<void> {
+    const config = vscode.workspace.getConfiguration('openDevContainer');
+    const explicitPath = (config.get<string>('dockerPath') || '').trim();
+    if (explicitPath) {
+      const clear = await vscode.window.showWarningMessage(
+        `"openDevContainer.dockerPath" is set to "${explicitPath}", which overrides runtime switching.`,
+        'Clear Setting and Switch'
+      );
+      if (!clear) {
+        return;
+      }
+      await config.update('dockerPath', undefined, vscode.ConfigurationTarget.Global);
+    }
+
+    await this.refreshAvailableRuntimes();
+    if (this.availableRuntimes.length === 0) {
+      throw new OpenDevContainerError('DOCKER_CLI_MISSING', 'No supported container CLI (docker or podman) was found on this host.');
+    }
+
+    const currentCli = this.getCurrentSettings().dockerPath;
+    const picked = runtimeId
+      ? this.availableRuntimes.find((runtime) => runtime.id === runtimeId)
+      : (await vscode.window.showQuickPick(
+        this.availableRuntimes.map((runtime) => ({
+          label: `${runtime.cli === currentCli ? '$(check)' : '$(blank)'} ${runtime.label}`,
+          description: runtime.cli === currentCli ? 'Current' : undefined,
+          runtime
+        })),
+        {
+          title: 'Switch Container Runtime',
+          placeHolder: `Using ${this.getActiveRuntimeLabel()} · Select a runtime to show its containers`
+        }
+      ))?.runtime;
+    if (!picked) {
+      return;
+    }
+
+    await this.context.globalState.update(ACTIVE_RUNTIME_STATE_KEY, picked.id);
+    this.log(`switched container runtime to ${picked.id}`);
+    this.refreshTree();
+  }
+
+  getActiveRuntimeLabel(): string {
+    const cli = this.getCurrentSettings().dockerPath;
+    return findRuntimeByCli(cli)?.label || cli;
+  }
+
   async inspectContainer(containerId: string) {
     return this.createDockerClient().inspectContainer(containerId);
   }
@@ -336,37 +498,69 @@ class OpenDevContainerService {
         cancellable: false
       },
       async (progress) => {
-        this.log(`attach start container=${container.ID} image=${container.Image}`);
+        const attachStartedAt = Date.now();
+        this.outputChannel.show(true);
+        const build = this.context.extension.packageJSON.openDevContainerBuild;
+        this.log(`attach start container=${container.ID} image=${container.Image} cli=${settings.dockerPath} build=${build?.id || 'unmarked'}`);
+        this.log('attach note: the first attach may install openssh-server inside the container.');
 
-        progress.report({ message: 'Inspecting container' });
-        const inspect = await new DockerClient(settings.dockerPath).inspectContainer(container.ID);
+        const runPhase = async <T>(name: string, message: string, action: () => Promise<T>): Promise<T> => {
+          const phaseStartedAt = Date.now();
+          progress.report({ message });
+          this.log(`attach phase=start name=${name} message=${message}`);
+          try {
+            const result = await action();
+            this.log(`attach phase=done name=${name} durationMs=${Date.now() - phaseStartedAt}`);
+            return result;
+          } catch (error: unknown) {
+            this.log(`attach phase=failed name=${name} durationMs=${Date.now() - phaseStartedAt}`);
+            throw error;
+          }
+        };
+
+        const inspect = await runPhase('inspect', 'Inspecting container', () =>
+          new DockerClient(settings.dockerPath).inspectContainer(container.ID)
+        );
         const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const workspaceFolder = settings.workspaceFolder || resolveWorkspaceFolder(inspect, localWorkspace);
         const workingDir = inspect.Config?.WorkingDir || '/';
         const mounts = inspect.Mounts || [];
 
-        progress.report({ message: 'Preparing SSH key' });
-        const keyPath = await this.ensureSshKey();
-        const publicKey = (await fs.readFile(`${keyPath}.pub`, 'utf8')).trim();
+        const { keyPath, publicKey } = await runPhase('ssh-key', 'Preparing SSH key', async () => {
+          const keyPath = await this.ensureSshKey();
+          const publicKey = (await fs.readFile(`${keyPath}.pub`, 'utf8')).trim();
+          return { keyPath, publicKey };
+        });
 
-        progress.report({ message: 'Preparing sshd inside container' });
-        const sshdPath = await prepareContainerSshd(settings.dockerPath, container.ID, settings.remoteUser, publicKey, settings.installSshd);
+        const sshdMessage = settings.installSshd
+          ? 'Preparing sshd (checking/installing openssh-server; first time may take a minute)'
+          : 'Preparing sshd (checking only; installation disabled)';
+        const sshdPath = await runPhase('sshd', sshdMessage, () =>
+          prepareContainerSshd(
+            settings.dockerPath,
+            container.ID,
+            settings.remoteUser,
+            publicKey,
+            settings.installSshd,
+            (stream, chunk) => this.logCommandOutput(`sshd ${stream}`, chunk)
+          )
+        );
 
         const hostAlias = createHostAlias(container);
-        progress.report({ message: 'Updating SSH config' });
-        await upsertSshConfig(settings.sshConfigPath, hostAlias, {
+        await runPhase('ssh-config', 'Updating SSH config', () => upsertSshConfig(settings.sshConfigPath, hostAlias, {
           dockerPath: settings.dockerPath,
           containerId: container.ID,
           identityFile: keyPath,
           remoteUser: settings.remoteUser,
           sshdPath,
           containerSshdConfig: CONTAINER_SSHD_CONFIG
-        });
+        }));
 
-        progress.report({ message: 'Opening Remote SSH window' });
-        await this.openRemoteFolder(hostAlias, workspaceFolder, settings.openInNewWindow);
+        await runPhase('remote-open', 'Opening Remote SSH window', () =>
+          this.openRemoteFolder(hostAlias, workspaceFolder, settings.openInNewWindow)
+        );
 
-        await this.recentStore.save({
+        await runPhase('recent-save', 'Saving recent connection', () => this.recentStore.save({
           connectionKey: buildConnectionKey({
             containerName: normalizeContainerName(container.Names),
             dockerPath: settings.dockerPath,
@@ -386,11 +580,9 @@ class OpenDevContainerService {
           lastStatus: container.Status,
           workingDir,
           mountSummary: summarizeMounts(mounts)
-        });
+        }));
 
-        this.outputChannel.appendLine(
-          `[${new Date().toISOString()}] attached ${normalizeContainerName(container.Names)} -> ${hostAlias} (${workspaceFolder})`
-        );
+        this.log(`attached ${normalizeContainerName(container.Names)} -> ${hostAlias} (${workspaceFolder}) durationMs=${Date.now() - attachStartedAt}`);
         this.refreshTree();
       }
     );
@@ -449,7 +641,11 @@ class OpenDevContainerService {
   private getCurrentSettings(): ConnectionSettings {
     const config = vscode.workspace.getConfiguration('openDevContainer');
     return {
-      dockerPath: config.get<string>('dockerPath') || 'podman',
+      dockerPath: resolveContainerCli(
+        config.get<string>('dockerPath') || '',
+        this.context.globalState.get<string>(ACTIVE_RUNTIME_STATE_KEY),
+        this.availableRuntimes.map((runtime) => runtime.id)
+      ),
       remoteUser: ensureSafeRemoteUser(config.get<string>('remoteUser') || 'root'),
       workspaceFolder: config.get<string>('workspaceFolder') || '',
       installSshd: config.get<boolean>('installSshd') ?? true,
@@ -516,6 +712,12 @@ class OpenDevContainerService {
 
   private log(message: string): void {
     this.outputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
+  }
+
+  private logCommandOutput(prefix: string, chunk: string): void {
+    for (const line of chunk.replace(/\r/g, '\n').split('\n').map((item) => item.trim()).filter(Boolean)) {
+      this.log(`${prefix}: ${line}`);
+    }
   }
 }
 

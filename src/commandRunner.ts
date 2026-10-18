@@ -1,18 +1,19 @@
 import { execFile } from 'node:child_process';
+import { findRuntimeByCli } from './containerRuntimes';
 import { OpenDevContainerError, formatErrorDetail } from './errors';
 import type { ExecResult } from './types';
-
-function isContainerCli(file: string): boolean {
-  return /(^|[\\/])(docker|podman)(\.exe)?$/i.test(file);
-}
 
 export async function execFileAsync(
   file: string,
   args: string[],
-  options: { maxBuffer?: number } = {}
+  options: {
+    maxBuffer?: number;
+    onStdout?: (chunk: string) => void;
+    onStderr?: (chunk: string) => void;
+  } = {}
 ): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { maxBuffer: options.maxBuffer ?? 1024 * 1024 }, (error, stdout, stderr) => {
+    const child = execFile(file, args, { maxBuffer: options.maxBuffer ?? 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         reject(normalizeCommandError(file, args, error, stdout, stderr));
         return;
@@ -20,6 +21,10 @@ export async function execFileAsync(
 
       resolve({ stdout, stderr });
     });
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string | Buffer) => options.onStdout?.(chunk.toString()));
+    child.stderr?.on('data', (chunk: string | Buffer) => options.onStderr?.(chunk.toString()));
   });
 }
 
@@ -31,9 +36,10 @@ export function normalizeCommandError(
   stderr: string
 ): OpenDevContainerError {
   const combined = [stderr.trim(), stdout.trim(), error.message].filter(Boolean).join('\n').trim();
+  const runtime = findRuntimeByCli(file);
 
   if (error.code === 'ENOENT') {
-    if (isContainerCli(file)) {
+    if (runtime) {
       return new OpenDevContainerError(
         'DOCKER_CLI_MISSING',
         `${file} was not found. Configure \`openDevContainer.dockerPath\` or install Podman/Docker.`,
@@ -50,8 +56,8 @@ export function normalizeCommandError(
     }
   }
 
-  if (isContainerCli(file)) {
-    if (/cannot connect to the Docker daemon|permission denied while trying to connect to the Docker daemon|is the docker daemon running|error during connect|cannot connect to podman|unable to connect to podman socket|podman.sock/i.test(combined)) {
+  if (runtime) {
+    if (runtime.daemonUnreachable.test(combined)) {
       return new OpenDevContainerError(
         'DOCKER_DAEMON_UNAVAILABLE',
         'The container engine is not reachable or the current user cannot access it.',
@@ -60,7 +66,7 @@ export function normalizeCommandError(
       );
     }
 
-    if (/permission denied|operation not permitted/i.test(combined) && /docker|podman/i.test(combined)) {
+    if (runtime.permissionDenied.test(combined) && combined.toLowerCase().includes(runtime.cli)) {
       return new OpenDevContainerError(
         'DOCKER_PERMISSION_DENIED',
         'The container engine denied the requested operation. Check socket permissions, rootless mode, or container policy.',

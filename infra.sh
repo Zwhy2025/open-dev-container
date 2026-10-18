@@ -19,6 +19,7 @@ Commands:
   lib_update  Install npm dependencies with npm ci
   build       Compile TypeScript to out/
   pack        Package the extension to dist/${vsix_file}
+  pack-debug  Compile and package a uniquely identified local debug build
   all         Run lib_update, build, then pack
 
 If no command is provided, infra.sh runs the full flow: lib_update -> build -> pack.
@@ -53,7 +54,7 @@ do_build() {
 }
 
 do_pack() {
-  require_node_modules
+  do_build
   require_vsce
   mkdir -p "$dist_dir"
   "$root_dir/node_modules/.bin/vsce" package --allow-missing-repository --out "$vsix_path"
@@ -74,6 +75,11 @@ case "$command" in
     ;;
   pack)
     do_pack
+    ;;
+  pack-debug)
+    do_build
+    require_vsce
+    run_root node scripts/package-debug.js
     ;;
   all)
     do_all

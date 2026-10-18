@@ -45,14 +45,20 @@ Open Dev Container: Attach to Running Container
 
 如果出现失败，优先查看输出通道 `Open Dev Container`，错误弹窗里也会提供 `Show Output` 入口。
 
+开发时可以使用 `test/containers-up.sh` 创建 Docker / Podman 测试容器，使用 `test/containers-down.sh` 清理这些测试容器；脚本只删除带有 `odc-` 前缀的测试容器，保留镜像。
+
 ## 设置项
 
-- `openDevContainer.dockerPath`：Docker CLI 路径，默认 `docker`。
+调试打包使用 `npm run pack:debug`（或 `bash infra.sh pack-debug`）：每次先编译，再生成带 UUID 的 VSIX。调试包名称含 `Debug`，使用独立的时间戳内部版本，并标记为预发布；源码的正式版本保持不变。激活和 Attach 日志会打印完整构建码，激活日志还包含实际加载路径。调试包沿用扩展 ID，会替换当前安装；安装后请重载窗口。切回较低版本的正式包时，需卸载调试包再安装正式包。`npm run pack` 仍用于正式打包，不会发布到市场。
+
+- `openDevContainer.dockerPath`：显式指定容器 CLI 路径；默认留空，表示自动探测可用的容器运行时（docker/podman）。
 - `openDevContainer.remoteUser`：容器内登录用户，默认 `root`。
 - `openDevContainer.workspaceFolder`：容器内打开的路径；留空时按挂载推断。
 - `openDevContainer.installSshd`：缺少时尝试安装 `openssh-server`，默认 `true`。
 - `openDevContainer.openInNewWindow`：是否在新编辑器窗口打开，默认 `true`。
 - `openDevContainer.sshConfigPath`：SSH 配置路径；留空表示 `~/.ssh/config`。
+
+容器运行时默认自动探测主机 PATH 中的 docker/podman（优先 docker）。容器面板顶部将 `Containers` 标题、`Docker` / `Podman` 文字下拉框、刷新和「…」菜单放在同一行，下方按 `Individual Containers` 分层展示所有容器及其状态（Running、Stopped、Created 等）和最近连接。容器行不放容易误触的操作按钮，右键菜单按状态提供 `Attach to container`、`Attach shell`、`Start`、`Stop`、`Restart` 和 `Remove`，菜单用分隔线区分连接、生命周期和删除操作；`Attach shell` 默认使用容器内的 `bash`，也可通过 `openDevContainer.containerShell` 设置为 `/bin/bash`、`zsh` 等命令，删除前会要求确认。点击下拉框可直接切换运行时，未检测到的选项会置灰；选择会被记住。若显式设置了 `dockerPath`，则以该设置为准。清理 SSH 配置入口位于「…」菜单中，也可针对单条最近连接执行。
 
 最近连接会保存在扩展全局存储中，编辑器重启后仍然可用。
 

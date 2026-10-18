@@ -11,13 +11,16 @@ export async function prepareContainerSshd(
   containerId: string,
   remoteUser: string,
   publicKey: string,
-  installSshd: boolean
+  installSshd: boolean,
+  onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void
 ): Promise<string> {
   const script = buildPrepareSshdScript(remoteUser, publicKey, installSshd);
 
   try {
     const { stdout, stderr } = await execFileAsync(dockerPath, ['exec', '-u', '0', containerId, 'sh', '-lc', script], {
-      maxBuffer: 5 * 1024 * 1024
+      maxBuffer: 5 * 1024 * 1024,
+      onStdout: (chunk) => onOutput?.('stdout', chunk),
+      onStderr: (chunk) => onOutput?.('stderr', chunk)
     });
 
     const sshdPath = parseMarker(stdout, 'OPEN_DEV_CONTAINER_SSHD_PATH');
@@ -52,7 +55,13 @@ export function parseManagedScriptError(error: unknown): OpenDevContainerError |
     case 'NO_PACKAGE_MANAGER':
       return new OpenDevContainerError(
         'NO_PACKAGE_MANAGER',
-        'The container does not have a supported package manager to install `openssh-server`.',
+        'The container does not have a supported package manager to install a required dependency (`bash` or `openssh-server`).',
+        output
+      );
+    case 'BASH_NOT_FOUND':
+      return new OpenDevContainerError(
+        'SSHD_CONFIG_INVALID',
+        'bash is required by Remote SSH but could not be installed in the container.',
         output
       );
     case 'REMOTE_USER_NOT_FOUND':
@@ -120,6 +129,35 @@ emit_error() {
 REMOTE_USER=${shellQuote(remoteUser)}
 PUBLIC_KEY=${shellQuote(publicKey)}
 ${installBlock}
+
+# Remote SSH's server bootstrap executes bash on the container.  Make this
+# prerequisite explicit here so a minimal image (for example Alpine) fails
+# early with a useful error instead of hanging during system checks.
+if ! command -v bash >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y bash
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache bash
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y bash
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y bash
+  elif command -v microdnf >/dev/null 2>&1; then
+    microdnf install -y bash
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm bash
+  else
+    echo "OPEN_DEV_CONTAINER_ERROR=NO_PACKAGE_MANAGER" >&2
+    echo "bash is required by Remote SSH and no supported package manager was found." >&2
+    exit 86
+  fi
+fi
+if ! command -v bash >/dev/null 2>&1; then
+  emit_error BASH_NOT_FOUND "bash is required by Remote SSH but could not be installed."
+fi
+
 SSHD_PATH="$(command -v sshd || true)"
 if [ -z "$SSHD_PATH" ] && [ -x /usr/sbin/sshd ]; then
   SSHD_PATH=/usr/sbin/sshd

@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const { buildPrepareSshdScript } = require('../out/containerProvisioner.js');
+const { CONTAINER_RUNTIMES, findRuntimeByCli, resolveContainerCli } = require('../out/containerRuntimes.js');
+const { execFileAsync, normalizeCommandError } = require('../out/commandRunner.js');
 const { parseDockerContainerList, parseDockerInspect } = require('../out/dockerClient.js');
 const { OpenDevContainerError } = require('../out/errors.js');
 const { RecentConnectionStore, sanitizeRecentConnection } = require('../out/recentConnections.js');
@@ -164,6 +166,8 @@ test('RecentConnectionStore filters invalid records, sorts, deduplicates, and re
 test('buildPrepareSshdScript includes install and no-install failure paths', () => {
   assert.match(buildPrepareSshdScript('root', 'ssh-ed25519 AAA test', true), /apt-get install -y openssh-server/);
   assert.match(buildPrepareSshdScript('root', 'ssh-ed25519 AAA test', true), /pacman -Sy --noconfirm openssh/);
+  assert.match(buildPrepareSshdScript('root', 'ssh-ed25519 AAA test', true), /apk add --no-cache bash/);
+  assert.match(buildPrepareSshdScript('root', 'ssh-ed25519 AAA test', true), /bash is required by Remote SSH/);
   assert.match(buildPrepareSshdScript('root', 'ssh-ed25519 AAA test', false), /OPEN_DEV_CONTAINER_ERROR=MISSING_SSHD/);
 });
 
@@ -211,4 +215,65 @@ test('buildPrepareSshdScript force command exits with the command instead of lin
   // Strips the login shell from open-remote-ssh's "... | bash -l" server install
   // so hostile container profile/rc files cannot swallow the piped script.
   assert.match(forceCommand, /\| bash -l"\)\s+CMD="\$\{CMD%\| bash -l\}\| bash"/);
+});
+
+test('findRuntimeByCli matches known container CLIs by basename', () => {
+  assert.ok(CONTAINER_RUNTIMES.length >= 2);
+  assert.equal(findRuntimeByCli('docker')?.id, 'docker');
+  assert.equal(findRuntimeByCli('/usr/bin/podman')?.id, 'podman');
+  assert.equal(findRuntimeByCli('C:\\tools\\PODMAN.EXE')?.id, 'podman');
+  assert.equal(findRuntimeByCli('ssh'), undefined);
+  assert.equal(findRuntimeByCli('/usr/local/bin/nerdctl'), undefined);
+});
+
+test('resolveContainerCli prefers explicit setting, then active runtime, then docker', () => {
+  assert.equal(resolveContainerCli('/usr/bin/podman', 'docker', ['docker', 'podman']), '/usr/bin/podman');
+  assert.equal(resolveContainerCli('', 'podman', ['docker', 'podman']), 'podman');
+  assert.equal(resolveContainerCli('  ', 'unknown-runtime', ['podman']), 'podman');
+  assert.equal(resolveContainerCli('', undefined, ['docker', 'podman']), 'docker');
+  assert.equal(resolveContainerCli('', undefined, ['podman']), 'podman');
+  assert.equal(resolveContainerCli('', undefined, []), 'docker');
+});
+
+test('normalizeCommandError classifies container engine errors via the runtime registry', () => {
+  const podmanDown = normalizeCommandError(
+    'podman',
+    ['ps'],
+    Object.assign(new Error('exit 125'), { code: 125 }),
+    '',
+    'Error: unable to connect to Podman socket: dial unix /run/user/1000/podman/podman.sock: connect: no such file or directory'
+  );
+  assert.equal(podmanDown.code, 'DOCKER_DAEMON_UNAVAILABLE');
+
+  const dockerDown = normalizeCommandError(
+    'docker',
+    ['ps'],
+    Object.assign(new Error('exit 1'), { code: 1 }),
+    '',
+    'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?'
+  );
+  assert.equal(dockerDown.code, 'DOCKER_DAEMON_UNAVAILABLE');
+
+  const missing = normalizeCommandError(
+    'podman',
+    ['ps'],
+    Object.assign(new Error('spawn podman ENOENT'), { code: 'ENOENT' }),
+    '',
+    ''
+  );
+  assert.equal(missing.code, 'DOCKER_CLI_MISSING');
+});
+
+test('execFileAsync streams stdout and stderr while preserving the final result', async () => {
+  const stdout = [];
+  const stderr = [];
+  const result = await execFileAsync(process.execPath, ['-e', 'process.stdout.write("progress-out"); process.stderr.write("progress-err")'], {
+    onStdout: (chunk) => stdout.push(chunk),
+    onStderr: (chunk) => stderr.push(chunk)
+  });
+
+  assert.equal(result.stdout, 'progress-out');
+  assert.equal(result.stderr, 'progress-err');
+  assert.equal(stdout.join(''), 'progress-out');
+  assert.equal(stderr.join(''), 'progress-err');
 });

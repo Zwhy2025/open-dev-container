@@ -1,9 +1,16 @@
 .vscode/**
 .git/**
+.workbuddy/**
+.github/**
 src/**
 node_modules/**
 test/**
+scripts/**
 *.vsix
 tsconfig.json
 README.md
 package-lock.json
+flake.lock
+flake.nix
+nix/**
+infra.sh

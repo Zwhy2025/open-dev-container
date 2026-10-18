@@ -1,8 +1,8 @@
 {
   "name": "open-dev-container",
-  "displayName": "Open Dev Container (podman fork)",
-  "description": "Open running Docker containers as development workspaces via Remote SSH. Supports VSCodium and jeanp413 SSH extension",
-  "version": "0.0.3",
+  "displayName": "Open Dev Container",
+  "description": "Open running Docker containers as development workspaces via Remote SSH. Supports VS Code-compatible editors such as Trae CN.",
+  "version": "0.0.4",
   "publisher": "Zwhy2025",
   "license": "MIT",
   "icon": "resources/open-dev-container.png",
@@ -25,7 +25,8 @@
     "onCommand:open-dev-container.reconnectConnection",
     "onCommand:open-dev-container.disconnectConnection",
     "onCommand:open-dev-container.cleanSshConfig",
-    "onCommand:open-dev-container.refreshContainers"
+    "onCommand:open-dev-container.refreshContainers",
+    "onCommand:open-dev-container.switchRuntime"
   ],
   "main": "./out/extension.js",
   "extensionKind": [
@@ -44,8 +45,9 @@
     "views": {
       "openDevContainer": [
         {
+          "type": "webview",
           "id": "openDevContainer.containersView",
-          "name": "Containers"
+          "name": "Open Dev Container"
         }
       ]
     },
@@ -79,56 +81,31 @@
         "title": "Refresh Containers",
         "category": "Open Dev Container",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "open-dev-container.switchRuntime",
+        "title": "Switch Container Runtime",
+        "category": "Open Dev Container",
+        "icon": "$(arrow-swap)"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "open-dev-container.refreshContainers",
-          "when": "view == openDevContainer.containersView",
-          "group": "navigation"
-        },
-        {
-          "command": "open-dev-container.cleanSshConfig",
-          "when": "view == openDevContainer.containersView",
-          "group": "navigation@2"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "open-dev-container.attachRunningContainer",
-          "when": "view == openDevContainer.containersView && viewItem == open-dev-container-container",
-          "group": "navigation"
-        },
-        {
-          "command": "open-dev-container.reconnectConnection",
-          "when": "view == openDevContainer.containersView && viewItem == open-dev-container-recent",
-          "group": "navigation"
-        },
-        {
-          "command": "open-dev-container.disconnectConnection",
-          "when": "view == openDevContainer.containersView && viewItem == open-dev-container-recent",
-          "group": "navigation@2"
-        },
-        {
-          "command": "open-dev-container.cleanSshConfig",
-          "when": "view == openDevContainer.containersView && viewItem == open-dev-container-recent",
-          "group": "navigation@3"
-        }
-      ]
-    },
     "configuration": {
       "title": "Open Dev Container",
       "properties": {
         "openDevContainer.dockerPath": {
           "type": "string",
-          "default": "podman",
-          "description": "Container CLI executable used by this extension (podman or docker)."
+          "default": "",
+          "description": "Explicit container CLI path (e.g. docker or podman). When empty, the extension auto-detects available runtimes and uses the runtime selected in the Containers view."
         },
         "openDevContainer.remoteUser": {
           "type": "string",
           "default": "root",
           "description": "User Remote SSH should log in as inside the container."
+        },
+        "openDevContainer.containerShell": {
+          "type": "string",
+          "default": "bash",
+          "description": "Shell command to run inside the container for Attach shell, such as bash, /bin/bash, or zsh."
         },
         "openDevContainer.workspaceFolder": {
           "type": "string",
@@ -160,7 +137,8 @@
     "package": "bash ./infra.sh pack",
     "lib_update": "bash ./infra.sh lib_update",
     "build": "bash ./infra.sh build",
-    "pack": "bash ./infra.sh pack"
+    "pack": "bash ./infra.sh pack",
+    "pack:debug": "bash ./infra.sh pack-debug"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
